@@ -1,0 +1,676 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>VR 3D Maze</title>
+    <style>
+        body {
+            margin: 0;
+            font-family: Arial, sans-serif;
+            background-color: #000;
+            color: #fff;
+            overflow: hidden;
+        }
+        #vr-button {
+            position: absolute;
+            bottom: 20px;
+            right: 20px;
+            padding: 12px 20px;
+            background-color: #1a73e8;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 16px;
+            z-index: 1000;
+        }
+        #vr-button:hover {
+            background-color: #2b7de9;
+        }
+        #info {
+            position: absolute;
+            top: 20px;
+            left: 20px;
+            z-index: 1000;
+            background: rgba(0,0,0,0.7);
+            padding: 10px;
+            border-radius: 5px;
+        }
+        #view-toggle {
+            position: absolute;
+            bottom: 20px;
+            left: 20px;
+            padding: 10px 15px;
+            background-color: #333;
+            color: white;
+            border: 1px solid #555;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 14px;
+            z-index: 1000;
+        }
+        #view-toggle:hover {
+            background-color: #444;
+        }
+    </style>
+</head>
+<body>
+    <div id="info">
+        VR 3D Maze<br>
+        Desktop: WASD/Arrow keys to move<br>
+        VR: Point controller and press trigger to teleport<br>
+        G: Toggle God View
+    </div>
+    <button id="vr-button">Enter VR</button>
+    <button id="view-toggle">God View</button>
+
+    <script type="importmap">
+        {
+            "imports": {
+                "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+                "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+            }
+        }
+    </script>
+
+    <script type="module">
+        import * as THREE from 'three';
+        import { VRButton } from 'three/addons/webxr/VRButton.js';
+
+        class VRMaze {
+            constructor() {
+                this.mazeSize = 11; // Even smaller for VR performance
+                this.cellSize = 2; // Size of each cell in world units
+                this.wallHeight = 3;
+                this.playerHeight = 1.6; // Average human height in VR
+                this.map = [];
+                this.playerPosition = { x: 0, z: 0 };
+                this.goalPosition = { x: 2, z: 2 };
+                this.isGodView = false;
+                this.normalCameraPosition = new THREE.Vector3();
+                
+                this.init();
+            }
+
+            init() {
+                // Scene setup
+                this.scene = new THREE.Scene();
+                this.scene.background = new THREE.Color(0x101820);
+                this.scene.fog = new THREE.Fog(0x101820, 10, 50);
+
+                // Camera setup
+                this.camera = new THREE.PerspectiveCamera(
+                    75,
+                    window.innerWidth / window.innerHeight,
+                    0.1,
+                    1000
+                );
+                this.camera.position.set(0, this.playerHeight, 0);
+
+                // Renderer setup - optimize for VR devices
+                this.renderer = new THREE.WebGLRenderer({ 
+                    antialias: false, // Disable for better performance
+                    powerPreference: "high-performance"
+                });
+                this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2)); // Limit pixel ratio
+                this.renderer.setSize(window.innerWidth, window.innerHeight);
+                this.renderer.shadowMap.enabled = false; // Disable shadows for performance
+                this.renderer.outputEncoding = THREE.sRGBEncoding;
+                this.renderer.xr.enabled = true;
+                document.body.appendChild(this.renderer.domElement);
+
+                // Use standard VRButton for better compatibility
+                const vrButton = VRButton.createButton(this.renderer);
+                document.body.appendChild(vrButton);
+                
+                // Hide custom VR button
+                document.getElementById('vr-button').style.display = 'none';
+
+                // Lighting
+                this.setupLighting();
+
+                // Player setup
+                this.setupPlayer();
+
+                // Generate initial maze
+                this.generateMaze();
+                this.buildMazeGeometry();
+
+                // Setup VR controllers
+                this.setupVRControllers();
+
+                // Desktop controls
+                this.setupDesktopControls();
+
+                // Handle window resize
+                window.addEventListener('resize', () => this.onWindowResize(), false);
+
+                // Start animation loop
+                this.renderer.setAnimationLoop(() => this.animate());
+            }
+
+            async startVRSession() {
+                try {
+                    const session = await navigator.xr.requestSession('immersive-vr', {
+                        optionalFeatures: ['local-floor', 'bounded-floor', 'hand-tracking']
+                    });
+                    this.renderer.xr.setSession(session);
+                    document.getElementById('vr-button').textContent = 'Exit VR';
+                } catch (err) {
+                    console.error('Failed to start VR session:', err);
+                }
+            }
+
+            setupLighting() {
+                // Simplified lighting for VR performance
+                const ambientLight = new THREE.AmbientLight(0xffffff, 1.0);
+                this.scene.add(ambientLight);
+
+                // Hemisphere light for natural lighting
+                const hemiLight = new THREE.HemisphereLight(0x87CEEB, 0x545454, 0.8);
+                this.scene.add(hemiLight);
+
+                // Single directional light (no shadows)
+                const directionalLight = new THREE.DirectionalLight(0xffffff, 0.5);
+                directionalLight.position.set(5, 20, 5);
+                this.scene.add(directionalLight);
+
+                // Player light (no shadows for performance)
+                this.playerLight = new THREE.PointLight(0xffffff, 1.5, 15);
+                this.playerLight.position.set(0, 2, 0);
+                this.scene.add(this.playerLight);
+
+                // Torch-like lights on walls
+                this.torchLights = [];
+            }
+
+            setupPlayer() {
+                // Player group (camera container for VR)
+                this.player = new THREE.Group();
+                this.player.add(this.camera);
+                this.player.add(this.playerLight);
+                this.scene.add(this.player);
+
+                // Set initial position (bottom-right corner)
+                this.playerPosition.x = this.mazeSize - 2;
+                this.playerPosition.z = this.mazeSize - 2;
+                this.updatePlayerPosition();
+            }
+
+            setupVRControllers() {
+                // Controller 1
+                this.controller1 = this.renderer.xr.getController(0);
+                this.controller1.addEventListener('selectstart', (e) => this.onSelectStart(e, this.controller1));
+                this.controller1.addEventListener('selectend', (e) => this.onSelectEnd(e, this.controller1));
+                this.player.add(this.controller1);
+
+                // Controller 2
+                this.controller2 = this.renderer.xr.getController(1);
+                this.controller2.addEventListener('selectstart', (e) => this.onSelectStart(e, this.controller2));
+                this.controller2.addEventListener('selectend', (e) => this.onSelectEnd(e, this.controller2));
+                this.player.add(this.controller2);
+
+                // Controller models
+                const controllerGeometry = new THREE.ConeGeometry(0.05, 0.2, 6);
+                const controllerMaterial = new THREE.MeshPhongMaterial({ color: 0x00ff00 });
+                
+                const controllerMesh1 = new THREE.Mesh(controllerGeometry, controllerMaterial);
+                controllerMesh1.rotation.x = -Math.PI / 2;
+                controllerMesh1.position.z = -0.1;
+                this.controller1.add(controllerMesh1);
+
+                const controllerMesh2 = new THREE.Mesh(controllerGeometry, controllerMaterial.clone());
+                controllerMesh2.rotation.x = -Math.PI / 2;
+                controllerMesh2.position.z = -0.1;
+                this.controller2.add(controllerMesh2);
+
+                // Teleport indicator
+                this.teleportIndicator = new THREE.Mesh(
+                    new THREE.RingGeometry(0.3, 0.4, 32),
+                    new THREE.MeshBasicMaterial({ color: 0x00ff00, side: THREE.DoubleSide })
+                );
+                this.teleportIndicator.rotation.x = -Math.PI / 2;
+                this.teleportIndicator.visible = false;
+                this.scene.add(this.teleportIndicator);
+
+                // Raycaster for teleportation
+                this.raycaster = new THREE.Raycaster();
+                this.tempMatrix = new THREE.Matrix4();
+            }
+
+            onSelectStart(event, controller) {
+                controller.userData.selecting = true;
+                this.showTeleportIndicator(controller);
+            }
+
+            onSelectEnd(event, controller) {
+                controller.userData.selecting = false;
+                this.teleportIndicator.visible = false;
+                
+                // Perform teleportation
+                if (controller.userData.teleportValid) {
+                    const pos = this.teleportIndicator.position;
+                    const mazeX = Math.round((pos.x + (this.mazeSize * this.cellSize) / 2) / this.cellSize);
+                    const mazeZ = Math.round((pos.z + (this.mazeSize * this.cellSize) / 2) / this.cellSize);
+                    
+                    if (this.canMoveTo(mazeX, mazeZ)) {
+                        this.playerPosition.x = mazeX;
+                        this.playerPosition.z = mazeZ;
+                        this.updatePlayerPosition();
+                        this.checkGoal();
+                    }
+                }
+            }
+
+            showTeleportIndicator(controller) {
+                this.tempMatrix.identity().extractRotation(controller.matrixWorld);
+                this.raycaster.ray.origin.setFromMatrixPosition(controller.matrixWorld);
+                this.raycaster.ray.direction.set(0, 0, -1).applyMatrix4(this.tempMatrix);
+
+                const intersects = this.raycaster.intersectObjects([this.floor]);
+                
+                if (intersects.length > 0) {
+                    const point = intersects[0].point;
+                    this.teleportIndicator.position.copy(point);
+                    this.teleportIndicator.position.y = 0.01;
+                    
+                    // Check if teleport position is valid (not in a wall)
+                    const mazeX = Math.round((point.x + (this.mazeSize * this.cellSize) / 2) / this.cellSize);
+                    const mazeZ = Math.round((point.z + (this.mazeSize * this.cellSize) / 2) / this.cellSize);
+                    
+                    if (this.canMoveTo(mazeX, mazeZ)) {
+                        this.teleportIndicator.material.color.setHex(0x00ff00);
+                        controller.userData.teleportValid = true;
+                    } else {
+                        this.teleportIndicator.material.color.setHex(0xff0000);
+                        controller.userData.teleportValid = false;
+                    }
+                    
+                    this.teleportIndicator.visible = true;
+                } else {
+                    this.teleportIndicator.visible = false;
+                    controller.userData.teleportValid = false;
+                }
+            }
+
+            setupDesktopControls() {
+                this.keys = {};
+                
+                window.addEventListener('keydown', (e) => {
+                    this.keys[e.key.toLowerCase()] = true;
+                    
+                    // Toggle god view
+                    if (e.key.toLowerCase() === 'g') {
+                        this.toggleGodView();
+                        return;
+                    }
+                    
+                    // Handle immediate movement (only in first-person view)
+                    if (!this.isGodView) {
+                        let dx = 0, dz = 0;
+                        
+                        if (e.key === 'ArrowUp' || e.key.toLowerCase() === 'w') dz = -1;
+                        if (e.key === 'ArrowDown' || e.key.toLowerCase() === 's') dz = 1;
+                        if (e.key === 'ArrowLeft' || e.key.toLowerCase() === 'a') dx = -1;
+                        if (e.key === 'ArrowRight' || e.key.toLowerCase() === 'd') dx = 1;
+                        
+                        if (dx !== 0 || dz !== 0) {
+                            this.movePlayer(dx, dz);
+                        }
+                    }
+                });
+                
+                window.addEventListener('keyup', (e) => {
+                    this.keys[e.key.toLowerCase()] = false;
+                });
+
+                // View toggle button
+                const viewToggleBtn = document.getElementById('view-toggle');
+                viewToggleBtn.addEventListener('click', () => this.toggleGodView());
+            }
+
+            toggleGodView() {
+                this.isGodView = !this.isGodView;
+                const viewToggleBtn = document.getElementById('view-toggle');
+                
+                if (this.isGodView) {
+                    // Switch to god view
+                    viewToggleBtn.textContent = 'First Person View';
+                    
+                    // Save current camera position
+                    this.normalCameraPosition.copy(this.camera.position);
+                    
+                    // Move camera to god view position
+                    this.camera.position.set(0, 40, 0);
+                    this.camera.lookAt(0, 0, 0);
+                    
+                    // Remove camera from player group
+                    this.player.remove(this.camera);
+                    this.scene.add(this.camera);
+                    
+                    // Show player marker
+                    if (this.playerMarker) {
+                        this.playerMarker.visible = true;
+                    }
+                } else {
+                    // Switch back to first person
+                    viewToggleBtn.textContent = 'God View';
+                    
+                    // Remove camera from scene and add back to player
+                    this.scene.remove(this.camera);
+                    this.player.add(this.camera);
+                    
+                    // Reset camera position
+                    this.camera.position.set(0, this.playerHeight, 0);
+                    this.camera.lookAt(0, this.playerHeight, -1);
+                    
+                    // Hide player marker
+                    if (this.playerMarker) {
+                        this.playerMarker.visible = false;
+                    }
+                }
+            }
+
+            movePlayer(dx, dz) {
+                const newX = this.playerPosition.x + dx;
+                const newZ = this.playerPosition.z + dz;
+                
+                if (this.canMoveTo(newX, newZ)) {
+                    this.playerPosition.x = newX;
+                    this.playerPosition.z = newZ;
+                    this.updatePlayerPosition();
+                    this.checkGoal();
+                }
+            }
+
+            canMoveTo(x, z) {
+                if (x < 0 || x >= this.mazeSize || z < 0 || z >= this.mazeSize) {
+                    return false;
+                }
+                return this.map[x][z] === 1;
+            }
+
+            updatePlayerPosition() {
+                const worldX = this.playerPosition.x * this.cellSize - (this.mazeSize * this.cellSize) / 2;
+                const worldZ = this.playerPosition.z * this.cellSize - (this.mazeSize * this.cellSize) / 2;
+                
+                this.player.position.x = worldX;
+                this.player.position.z = worldZ;
+                
+                // Update player light position
+                this.playerLight.position.x = worldX;
+                this.playerLight.position.z = worldZ;
+            }
+
+            checkGoal() {
+                if (this.playerPosition.x === this.goalPosition.x && 
+                    this.playerPosition.z === this.goalPosition.z) {
+                    // Victory! Generate new maze
+                    setTimeout(() => {
+                        this.clearMaze();
+                        this.generateMaze();
+                        this.buildMazeGeometry();
+                        
+                        // Reset player position
+                        this.playerPosition.x = this.mazeSize - 2;
+                        this.playerPosition.z = this.mazeSize - 2;
+                        this.updatePlayerPosition();
+                    }, 1000);
+                }
+            }
+
+            generateMaze() {
+                console.log('Starting maze generation...');
+                
+                // Initialize maze with all walls (0)
+                this.map = Array(this.mazeSize).fill(null).map(() => 
+                    Array(this.mazeSize).fill(0)
+                );
+
+                // Simple recursive backtracking algorithm
+                const visited = Array(this.mazeSize).fill(null).map(() => 
+                    Array(this.mazeSize).fill(false)
+                );
+
+                // Helper function to check if a cell is valid
+                const isValid = (x, y) => {
+                    return x > 0 && x < this.mazeSize - 1 && 
+                           y > 0 && y < this.mazeSize - 1;
+                };
+
+                // Iterative function to carve the maze (avoid stack overflow)
+                const stack = [];
+                const carve = (startX, startY) => {
+                    stack.push([startX, startY]);
+                    visited[startX][startY] = true;
+                    this.map[startX][startY] = 1;
+
+                    while (stack.length > 0) {
+                        const [x, y] = stack[stack.length - 1];
+                        
+                        // Create random order of directions
+                        const directions = [
+                            [0, -2], [2, 0], [0, 2], [-2, 0]
+                        ];
+                        
+                        // Shuffle directions
+                        for (let i = directions.length - 1; i > 0; i--) {
+                            const j = Math.floor(Math.random() * (i + 1));
+                            [directions[i], directions[j]] = [directions[j], directions[i]];
+                        }
+
+                        // Find unvisited neighbors
+                        let found = false;
+                        for (const [dx, dy] of directions) {
+                            const nx = x + dx;
+                            const ny = y + dy;
+
+                            if (isValid(nx, ny) && !visited[nx][ny]) {
+                                // Carve the wall between current and next cell
+                                visited[nx][ny] = true;
+                                this.map[nx][ny] = 1;
+                                this.map[x + dx/2][y + dy/2] = 1;
+                                stack.push([nx, ny]);
+                                found = true;
+                                break;
+                            }
+                        }
+
+                        if (!found) {
+                            stack.pop();
+                        }
+                    }
+                };
+
+                // Start from a random even position
+                const startX = 2 * Math.floor(Math.random() * Math.floor((this.mazeSize - 1) / 2)) + 1;
+                const startY = 2 * Math.floor(Math.random() * Math.floor((this.mazeSize - 1) / 2)) + 1;
+                
+                console.log(`Starting position: ${startX}, ${startY}`);
+                carve(startX, startY);
+
+                // Ensure start position (bottom-right) is accessible
+                const playerStartX = this.mazeSize - 2;
+                const playerStartZ = this.mazeSize - 2;
+                this.map[playerStartX][playerStartZ] = 1;
+                this.map[playerStartX - 1][playerStartZ] = 1;
+                this.map[playerStartX][playerStartZ - 1] = 1;
+                
+                // Ensure goal position is accessible
+                this.map[2][2] = 1;
+                this.map[1][2] = 1;
+                this.map[2][1] = 1;
+                
+                console.log('Maze generation complete');
+            }
+
+            buildMazeGeometry() {
+                // Create floor
+                const floorGeometry = new THREE.PlaneGeometry(
+                    this.mazeSize * this.cellSize,
+                    this.mazeSize * this.cellSize
+                );
+                const floorMaterial = new THREE.MeshLambertMaterial({ 
+                    color: 0x333333
+                });
+                this.floor = new THREE.Mesh(floorGeometry, floorMaterial);
+                this.floor.rotation.x = -Math.PI / 2;
+                this.scene.add(this.floor);
+
+                // Create walls
+                this.walls = new THREE.Group();
+                const wallGeometry = new THREE.BoxGeometry(this.cellSize, this.wallHeight, this.cellSize);
+                const wallMaterial = new THREE.MeshLambertMaterial({ 
+                    color: 0x4444ff
+                });
+
+                for (let x = 0; x < this.mazeSize; x++) {
+                    for (let z = 0; z < this.mazeSize; z++) {
+                        if (this.map[x][z] === 0) {
+                            const wall = new THREE.Mesh(wallGeometry, wallMaterial);
+                            wall.position.x = x * this.cellSize - (this.mazeSize * this.cellSize) / 2;
+                            wall.position.y = this.wallHeight / 2;
+                            wall.position.z = z * this.cellSize - (this.mazeSize * this.cellSize) / 2;
+                            this.walls.add(wall);
+                        }
+                    }
+                }
+                this.scene.add(this.walls);
+
+                // Create goal
+                const goalGeometry = new THREE.BoxGeometry(
+                    this.cellSize * 0.8,
+                    this.cellSize * 0.8,
+                    this.cellSize * 0.8
+                );
+                const goalMaterial = new THREE.MeshBasicMaterial({ 
+                    color: 0xff0000
+                });
+                this.goal = new THREE.Mesh(goalGeometry, goalMaterial);
+                this.goal.position.x = this.goalPosition.x * this.cellSize - (this.mazeSize * this.cellSize) / 2;
+                this.goal.position.y = this.cellSize * 0.4;
+                this.goal.position.z = this.goalPosition.z * this.cellSize - (this.mazeSize * this.cellSize) / 2;
+                this.scene.add(this.goal);
+
+                // Add torch lights
+                this.addTorchLights();
+
+                // Add player marker for god view
+                this.createPlayerMarker();
+            }
+
+            createPlayerMarker() {
+                // Create a visible player marker for god view
+                const markerGeometry = new THREE.ConeGeometry(0.5, 1, 8);
+                const markerMaterial = new THREE.MeshPhongMaterial({ 
+                    color: 0x00ff00,
+                    emissive: 0x00ff00,
+                    emissiveIntensity: 0.3
+                });
+                this.playerMarker = new THREE.Mesh(markerGeometry, markerMaterial);
+                this.playerMarker.position.y = 1;
+                this.playerMarker.visible = false; // Initially hidden
+                this.player.add(this.playerMarker);
+            }
+
+            addTorchLights() {
+                // Reduced torch count for performance
+                const torchCount = 8;
+                
+                for (let i = 0; i < torchCount; i++) {
+                    let x, z;
+                    do {
+                        x = Math.floor(Math.random() * this.mazeSize);
+                        z = Math.floor(Math.random() * this.mazeSize);
+                    } while (this.map[x][z] === 0 || 
+                            (x === this.playerPosition.x && z === this.playerPosition.z) ||
+                            (x === this.goalPosition.x && z === this.goalPosition.z));
+                    
+                    // Simple torch light (no shadows)
+                    const torch = new THREE.PointLight(0xffaa00, 1.0, 10);
+                    torch.position.x = x * this.cellSize - (this.mazeSize * this.cellSize) / 2;
+                    torch.position.y = this.wallHeight * 0.7;
+                    torch.position.z = z * this.cellSize - (this.mazeSize * this.cellSize) / 2;
+                    this.scene.add(torch);
+                    this.torchLights.push(torch);
+
+                    // Simple torch mesh
+                    const torchMesh = new THREE.Mesh(
+                        new THREE.CylinderGeometry(0.1, 0.15, 0.4),
+                        new THREE.MeshBasicMaterial({ color: 0xff6600 })
+                    );
+                    torchMesh.position.copy(torch.position);
+                    torchMesh.position.y -= 0.2;
+                    this.scene.add(torchMesh);
+                }
+            }
+
+            clearMaze() {
+                // Remove walls
+                if (this.walls) {
+                    this.scene.remove(this.walls);
+                    this.walls.traverse((child) => {
+                        if (child.geometry) child.geometry.dispose();
+                        if (child.material) child.material.dispose();
+                    });
+                }
+
+                // Remove goal
+                if (this.goal) {
+                    this.scene.remove(this.goal);
+                    this.goal.geometry.dispose();
+                    this.goal.material.dispose();
+                }
+
+                // Remove floor
+                if (this.floor) {
+                    this.scene.remove(this.floor);
+                    this.floor.geometry.dispose();
+                    this.floor.material.dispose();
+                }
+
+                // Remove torch lights
+                this.torchLights.forEach(light => {
+                    this.scene.remove(light);
+                });
+                this.torchLights = [];
+            }
+
+            animate() {
+                // Update VR controllers
+                if (this.renderer.xr.isPresenting) {
+                    if (this.controller1.userData.selecting) {
+                        this.showTeleportIndicator(this.controller1);
+                    }
+                    if (this.controller2.userData.selecting) {
+                        this.showTeleportIndicator(this.controller2);
+                    }
+                }
+
+                // Animate goal
+                if (this.goal) {
+                    this.goal.rotation.y += 0.01;
+                    this.goal.position.y = this.cellSize * 0.4 + Math.sin(Date.now() * 0.002) * 0.1;
+                }
+
+                // Simple torch flicker
+                this.torchLights.forEach((light, i) => {
+                    light.intensity = 1.0 + Math.sin(Date.now() * 0.005 + i) * 0.1;
+                });
+
+                this.renderer.render(this.scene, this.camera);
+            }
+
+            onWindowResize() {
+                this.camera.aspect = window.innerWidth / window.innerHeight;
+                this.camera.updateProjectionMatrix();
+                this.renderer.setSize(window.innerWidth, window.innerHeight);
+            }
+        }
+
+        // Initialize the VR maze
+        const vrMaze = new VRMaze();
+    </script>
+</body>
+</html>
